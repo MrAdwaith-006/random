@@ -5,58 +5,95 @@
 
 namespace SheikzAmp::Audio {
 
-void SignalProcessor::setSettings(AmplifierSettings settings) noexcept {
-    settings_.preamp = std::max(0.0F, settings.preamp);
-    settings_.ceiling = std::clamp(settings.ceiling, 0.01F, 1.0F);
-    settings_.saturation = std::clamp(settings.saturation, 0.0F, 1.0F);
+void SignalProcessor::setSettings(
+    AmplifierSettings settings) noexcept {
+
+    settings_.preamp = std::clamp(
+        settings.preamp,
+        0.0F,
+        100.0F);
+
+    settings_.ceiling = std::clamp(
+        settings.ceiling,
+        0.01F,
+        1.0F);
+
+    settings_.saturation = std::clamp(
+        settings.saturation,
+        0.0F,
+        1.0F);
+
+    settings_.maxLoud = settings.maxLoud;
 }
 
-void SignalProcessor::processInterleaved(std::span<float> samples) const noexcept {
+void SignalProcessor::processInterleaved(
+    std::span<float> samples) const noexcept {
+
     const float gain = settings_.preamp;
     const float ceiling = settings_.ceiling;
-    const float saturation = settings_.saturation;
+
+    if (gain <= 0.0F) {
+        std::fill(samples.begin(), samples.end(), 0.0F);
+        return;
+    }
 
     for (float& sample : samples) {
-        const float amplified = sample * gain;
 
-        // At zero saturation, use a clean soft limiter.
-        if (saturation <= 0.0001F) {
-            const float magnitude = std::abs(amplified);
+        float x = sample * gain;
 
-            if (magnitude <= ceiling) {
-                sample = amplified;
-            } else {
-                // Smoothly approaches the ceiling instead of hard clipping.
-                const float excess = magnitude - ceiling;
-                const float compressed = ceiling +
-                    (1.0F - ceiling) * std::tanh(excess / (1.0F - ceiling));
+        if (settings_.maxLoud) {
 
-                sample = std::copysign(compressed, amplified);
-            }
+            // Aggressive soft compression.
+            const float sign =
+                std::copysign(1.0F, x);
 
+            const float magnitude =
+                std::abs(x);
+
+            // Strong compression above 1.0.
+            float compressed =
+                1.0F - std::exp(-magnitude * 1.35F);
+
+            x = sign * compressed;
+
+            // Additional saturation for perceived loudness.
+            x = std::tanh(x * 2.2F);
+
+            // Push the result toward the ceiling.
+            x *= ceiling / std::tanh(2.2F);
+
+            x = std::clamp(
+                x,
+                -ceiling,
+                ceiling);
+
+            sample = x;
             continue;
         }
 
-        // Optional saturation for extreme amplification.
-        const float drive = 1.0F + saturation * 8.0F;
-        const float saturated = std::tanh(amplified * drive);
-
-        // Blend clean and saturated signal.
-        const float mixed =
-            amplified * (1.0F - saturation) +
-            saturated * saturation;
-
-        const float magnitude = std::abs(mixed);
+        // Normal mode.
+        const float magnitude =
+            std::abs(x);
 
         if (magnitude <= ceiling) {
-            sample = mixed;
-        } else {
-            const float excess = magnitude - ceiling;
-            const float compressed = ceiling +
-                (1.0F - ceiling) * std::tanh(excess / (1.0F - ceiling));
-
-            sample = std::copysign(compressed, mixed);
+            sample = x;
+            continue;
         }
+
+        const float excess =
+            magnitude - ceiling;
+
+        const float compressed =
+            ceiling +
+            (1.0F - ceiling) *
+            std::tanh(
+                excess /
+                (1.0F - ceiling));
+
+        sample =
+            std::copysign(
+                compressed,
+                x);
     }
 }
 
