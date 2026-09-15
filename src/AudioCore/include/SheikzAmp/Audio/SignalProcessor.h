@@ -9,8 +9,7 @@ struct AmplifierSettings {
     float ceiling{0.98F};
     float saturation{0.0F};
 
-    // MAX LOUD mode
-    bool maxLoud{false};
+    bool maxLoud{true};
 };
 
 class SignalProcessor final {

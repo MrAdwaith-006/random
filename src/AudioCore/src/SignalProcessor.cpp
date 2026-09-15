@@ -10,7 +10,7 @@ void SignalProcessor::setSettings(
 
     settings_.preamp = std::clamp(
         settings.preamp,
-        0.0F,
+        1.0F,
         100.0F);
 
     settings_.ceiling = std::clamp(
@@ -29,39 +29,75 @@ void SignalProcessor::setSettings(
 void SignalProcessor::processInterleaved(
     std::span<float> samples) const noexcept {
 
-    const float gain = settings_.preamp;
-    const float ceiling = settings_.ceiling;
-
-    if (gain <= 0.0F) {
-        std::fill(samples.begin(), samples.end(), 0.0F);
+    if (samples.empty()) {
         return;
     }
 
+    const float gain = settings_.preamp;
+    const float ceiling = settings_.ceiling;
+
+    /*
+     * Build 2:
+     * Basic speech-focused processing.
+     *
+     * Very quiet signals are attenuated before amplification.
+     * Speech-level signals are amplified normally.
+     * Strong signals are compressed to keep speech loud without
+     * allowing peaks to dominate.
+     */
+
+    constexpr float noiseFloor = 0.008F;
+    constexpr float speechStart = 0.025F;
+
     for (float& sample : samples) {
 
-        float x = sample * gain;
+        const float input = sample;
+        const float magnitude = std::abs(input);
+
+        // Basic noise gate.
+        if (magnitude < noiseFloor) {
+            sample = 0.0F;
+            continue;
+        }
+
+        float x = input * gain;
 
         if (settings_.maxLoud) {
 
-            // Aggressive soft compression.
-            const float sign =
-                std::copysign(1.0F, x);
 
-            const float magnitude =
-                std::abs(x);
+            /*
+             * Gentle expansion around speech level.
+             * Keeps normal speech prominent while avoiding
+             * unnecessary amplification of very small noise.
+             */
+            if (magnitude < speechStart) {
+                x *= 0.55F;
+            }
 
-            // Strong compression above 1.0.
-            float compressed =
-                1.0F - std::exp(-magnitude * 1.35F);
+            /*
+             * Strong dynamic compression.
+             * Quiet speech remains boosted while loud peaks
+             * are brought under control.
+             */
+            const float compressedMagnitude =
+                1.0F -
+                std::exp(
+                    -std::abs(x) * 1.15F);
 
-            x = sign * compressed;
+            x =
+                std::copysign(
+                    compressedMagnitude,
+                    x);
 
-            // Additional saturation for perceived loudness.
-            x = std::tanh(x * 2.2F);
+            /*
+             * Additional soft saturation gives speech
+             * more perceived loudness.
+             */
+            x = std::tanh(x * 2.0F);
 
-            // Push the result toward the ceiling.
-            x *= ceiling / std::tanh(2.2F);
-
+            /*
+             * Final peak limiter.
+             */
             x = std::clamp(
                 x,
                 -ceiling,
@@ -71,17 +107,14 @@ void SignalProcessor::processInterleaved(
             continue;
         }
 
-        // Normal mode.
-        const float magnitude =
-            std::abs(x);
-
-        if (magnitude <= ceiling) {
+        // Normal processing.
+        if (std::abs(x) <= ceiling) {
             sample = x;
             continue;
         }
 
         const float excess =
-            magnitude - ceiling;
+            std::abs(x) - ceiling;
 
         const float compressed =
             ceiling +

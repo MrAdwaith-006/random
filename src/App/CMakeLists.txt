@@ -1,4 +1,4 @@
-add_executable(SheikzAmp
+add_executable(SheikzAmp WIN32
     src/main.cpp
 )
 
