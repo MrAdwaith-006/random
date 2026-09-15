@@ -1,0 +1,11 @@
+# Build output
+/build/
+/out/
+/.vs/
+/.idea/
+
+# User-specific Visual Studio files
+*.user
+*.suo
+*.VC.db
+*.VC.opendb
