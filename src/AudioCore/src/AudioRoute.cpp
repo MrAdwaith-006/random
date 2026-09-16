@@ -1302,8 +1302,8 @@ private:
             FloatRingBuffer outputQueue(
                 std::max<std::size_t>(
                     static_cast<std::size_t>(
-                        outputBufferFrames) * 6,
-                    4096),
+                        outputBufferFrames) * 2,
+                    2048),
                 outputChannels);
 
             LinearResampler outputResampler(
@@ -1316,8 +1316,8 @@ private:
                     static_cast<std::size_t>(
                         selfHear
                             ? speakerBufferFrames
-                            : 0) * 6,
-                    4096),
+                            : 0) * 2,
+                    2048),
                 selfHear
                     ? speakerChannels
                     : 1);

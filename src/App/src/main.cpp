@@ -40,8 +40,8 @@ HWND g_startButton = nullptr;
 HWND g_status = nullptr;
 
 std::vector<AudioDevice> g_microphones;
-std::vector<AudioDevice> g_outputRoutes;
 std::vector<AudioDevice> g_speakers;
+std::vector<AudioDevice> g_outputRoutes;
 
 std::unique_ptr<AudioRoute> g_route;
 bool g_running = false;
@@ -75,8 +75,9 @@ void populateDevices() {
     g_microphones =
         DeviceEnumerator().recordingDevices();
 
+    
     g_outputRoutes =
-        DeviceEnumerator().playbackDevices();
+        DeviceEnumerator().playbackDevices();    
 
     g_speakers =
         DeviceEnumerator().playbackDevices();
@@ -466,19 +467,11 @@ LRESULT CALLBACK windowProc(
                 410,
                 180);
 
-        createLabel(
-            hwnd,
-            L"Output: VB-CABLE Input (automatic)",
-            35,
-            155,
-            410,
-            25);
-
 createLabel(
             hwnd,
             L"Self-Hear Speaker",
             35,
-            165,
+            155,
             200,
             25);
 
@@ -487,7 +480,7 @@ createLabel(
                 hwnd,
                 IDC_SPEAKER,
                 35,
-                193,
+                183,
                 410,
                 180);
 
@@ -495,7 +488,7 @@ createLabel(
             hwnd,
             L"Amplification",
             35,
-            240,
+            230,
             200,
             25);
 
@@ -509,7 +502,7 @@ createLabel(
                 WS_TABSTOP |
                 TBS_AUTOTICKS,
                 35,
-                270,
+                260,
                 350,
                 35,
                 hwnd,
@@ -535,7 +528,7 @@ createLabel(
                 hwnd,
                 L"50x",
                 395,
-                270,
+                260,
                 60,
                 35);
 
@@ -548,7 +541,7 @@ createLabel(
                 WS_VISIBLE |
                 BS_AUTOCHECKBOX,
                 35,
-                320,
+                310,
                 180,
                 30,
                 hwnd,
@@ -572,7 +565,7 @@ createLabel(
                 WS_VISIBLE |
                 BS_AUTOCHECKBOX,
                 230,
-                320,
+                310,
                 150,
                 30,
                 hwnd,
@@ -597,7 +590,7 @@ createLabel(
                 WS_TABSTOP |
                 BS_PUSHBUTTON,
                 35,
-                375,
+                365,
                 410,
                 50,
                 hwnd,
@@ -611,7 +604,7 @@ createLabel(
                 hwnd,
                 L"Status: STOPPED",
                 35,
-                440,
+                430,
                 410,
                 30);
 

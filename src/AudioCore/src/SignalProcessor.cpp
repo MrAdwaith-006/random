@@ -36,97 +36,129 @@ void SignalProcessor::processInterleaved(
     const float gain = settings_.preamp;
     const float ceiling = settings_.ceiling;
 
+    if (!settings_.maxLoud) {
+
+        // Clean amplification with only peak protection.
+        for (float& sample : samples) {
+
+            float x = sample * gain;
+
+            if (std::abs(x) <= ceiling) {
+                sample = x;
+                continue;
+            }
+
+            const float sign =
+                std::copysign(1.0F, x);
+
+            const float excess =
+                std::abs(x) - ceiling;
+
+            const float range =
+                1.0F - ceiling;
+
+            const float compressed =
+                ceiling +
+                range *
+                    (1.0F -
+                     std::exp(
+                         -excess /
+                         std::max(
+                             range,
+                             0.001F)));
+
+            sample =
+                sign *
+                std::min(
+                    compressed,
+                    0.9999F);
+        }
+
+        return;
+    }
+
     /*
-     * Build 2:
-     * Basic speech-focused processing.
+     * MAX LOUD
      *
-     * Very quiet signals are attenuated before amplification.
-     * Speech-level signals are amplified normally.
-     * Strong signals are compressed to keep speech loud without
-     * allowing peaks to dominate.
+     * High-quality loudness processing:
+     *
+     * 1. Clean gain
+     * 2. Gentle dynamic compression
+     * 3. Transparent soft limiting
+     *
+     * Avoids the previous aggressive tanh stages
+     * which caused audible distortion on music/radio.
      */
 
-    constexpr float noiseFloor = 0.008F;
-    constexpr float speechStart = 0.025F;
+    constexpr float compressorThreshold = 0.18F;
+    constexpr float compressorRatio = 4.0F;
+    constexpr float limiterThreshold = 0.94F;
+
+    constexpr float noiseThreshold = 0.012F;
+    constexpr float gateFloor = 0.18F;
 
     for (float& sample : samples) {
 
-        const float input = sample;
-        const float magnitude = std::abs(input);
+        float input = sample;
+        float magnitude = std::abs(input);
 
-        // Basic noise gate.
-        if (magnitude < noiseFloor) {
-            sample = 0.0F;
-            continue;
+        // Gentle reduction of very quiet microphone noise.
+        if (magnitude < noiseThreshold) {
+            const float ratio =
+                magnitude / noiseThreshold;
+
+            const float gainReduction =
+                gateFloor +
+                (1.0F - gateFloor) * ratio;
+
+            input *= gainReduction;
         }
 
         float x = input * gain;
 
-        if (settings_.maxLoud) {
+        const float sign =
+            std::copysign(1.0F, x);
 
+        magnitude = std::abs(x);
 
-            /*
-             * Gentle expansion around speech level.
-             * Keeps normal speech prominent while avoiding
-             * unnecessary amplification of very small noise.
-             */
-            if (magnitude < speechStart) {
-                x *= 0.55F;
-            }
+        // Gentle compression above threshold.
+        if (magnitude > compressorThreshold) {
 
-            /*
-             * Strong dynamic compression.
-             * Quiet speech remains boosted while loud peaks
-             * are brought under control.
-             */
-            const float compressedMagnitude =
+            const float excess =
+                magnitude -
+                compressorThreshold;
+
+            magnitude =
+                compressorThreshold +
+                excess / compressorRatio;
+        }
+
+        // Transparent soft limiter.
+        if (magnitude > limiterThreshold) {
+
+            const float excess =
+                magnitude -
+                limiterThreshold;
+
+            const float range =
                 1.0F -
-                std::exp(
-                    -std::abs(x) * 1.15F);
+                limiterThreshold;
 
-            x =
-                std::copysign(
-                    compressedMagnitude,
-                    x);
-
-            /*
-             * Additional soft saturation gives speech
-             * more perceived loudness.
-             */
-            x = std::tanh(x * 2.0F);
-
-            /*
-             * Final peak limiter.
-             */
-            x = std::clamp(
-                x,
-                -ceiling,
-                ceiling);
-
-            sample = x;
-            continue;
+            magnitude =
+                limiterThreshold +
+                range *
+                    std::tanh(
+                        excess /
+                        std::max(
+                            range,
+                            0.001F));
         }
-
-        // Normal processing.
-        if (std::abs(x) <= ceiling) {
-            sample = x;
-            continue;
-        }
-
-        const float excess =
-            std::abs(x) - ceiling;
-
-        const float compressed =
-            ceiling +
-            (1.0F - ceiling) *
-            std::tanh(
-                excess /
-                (1.0F - ceiling));
 
         sample =
-            std::copysign(
-                compressed,
-                x);
+            sign *
+            std::min(
+                magnitude,
+                ceiling);
     }
 }
 
