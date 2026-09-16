@@ -21,13 +21,13 @@ using namespace SheikzAmp::Audio;
 namespace {
 
 constexpr int IDC_MIC = 1001;
-constexpr int IDC_SPEAKER = 1002;
-constexpr int IDC_GAIN = 1003;
-constexpr int IDC_GAIN_LABEL = 1004;
-constexpr int IDC_MAX_LOUD = 1005;
-constexpr int IDC_SELF_HEAR = 1006;
-constexpr int IDC_START = 1007;
-constexpr int IDC_STATUS = 1008;
+constexpr int IDC_SPEAKER = 1003;
+constexpr int IDC_GAIN = 1004;
+constexpr int IDC_GAIN_LABEL = 1005;
+constexpr int IDC_MAX_LOUD = 1006;
+constexpr int IDC_SELF_HEAR = 1007;
+constexpr int IDC_START = 1008;
+constexpr int IDC_STATUS = 1009;
 
 HWND g_window = nullptr;
 HWND g_micCombo = nullptr;
@@ -40,6 +40,7 @@ HWND g_startButton = nullptr;
 HWND g_status = nullptr;
 
 std::vector<AudioDevice> g_microphones;
+std::vector<AudioDevice> g_outputRoutes;
 std::vector<AudioDevice> g_speakers;
 
 std::unique_ptr<AudioRoute> g_route;
@@ -74,6 +75,9 @@ void populateDevices() {
     g_microphones =
         DeviceEnumerator().recordingDevices();
 
+    g_outputRoutes =
+        DeviceEnumerator().playbackDevices();
+
     g_speakers =
         DeviceEnumerator().playbackDevices();
 
@@ -82,6 +86,7 @@ void populateDevices() {
         CB_RESETCONTENT,
         0,
         0);
+
 
     SendMessageW(
         g_speakerCombo,
@@ -98,6 +103,7 @@ void populateDevices() {
                 mic.name.c_str()));
     }
 
+
     for (const auto& speaker : g_speakers) {
         SendMessageW(
             g_speakerCombo,
@@ -110,16 +116,25 @@ void populateDevices() {
     int defaultMic = 0;
     int defaultSpeaker = 0;
 
-    for (std::size_t i = 0; i < g_microphones.size(); ++i) {
+    for (std::size_t i = 0;
+         i < g_microphones.size();
+         ++i) {
+
         if (g_microphones[i].isDefault) {
-            defaultMic = static_cast<int>(i);
+            defaultMic =
+                static_cast<int>(i);
             break;
         }
     }
 
-    for (std::size_t i = 0; i < g_speakers.size(); ++i) {
+
+    for (std::size_t i = 0;
+         i < g_speakers.size();
+         ++i) {
+
         if (g_speakers[i].isDefault) {
-            defaultSpeaker = static_cast<int>(i);
+            defaultSpeaker =
+                static_cast<int>(i);
             break;
         }
     }
@@ -129,6 +144,7 @@ void populateDevices() {
         CB_SETCURSEL,
         defaultMic,
         0);
+
 
     SendMessageW(
         g_speakerCombo,
@@ -144,11 +160,11 @@ void startAmplifier() {
     }
 
     const int micIndex = static_cast<int>(
-        SendMessageW(
-            g_micCombo,
-            CB_GETCURSEL,
-            0,
-            0));
+    SendMessageW(
+        g_micCombo,
+        CB_GETCURSEL,
+        0,
+        0));
 
     const int speakerIndex = static_cast<int>(
         SendMessageW(
@@ -157,14 +173,31 @@ void startAmplifier() {
             0,
             0));
 
+    const bool selfHear =
+        SendMessageW(
+            g_selfHear,
+            BM_GETCHECK,
+            0,
+            0) == BST_CHECKED;
+
+    int cableInputIndex = -1;
+    for (std::size_t i = 0; i < g_outputRoutes.size(); ++i) {
+        if (g_outputRoutes[i].name.find(L"CABLE Input") != std::wstring::npos) {
+            cableInputIndex = static_cast<int>(i);
+            break;
+        }
+    }
+
     if (micIndex < 0 ||
-        speakerIndex < 0 ||
         micIndex >= static_cast<int>(g_microphones.size()) ||
-        speakerIndex >= static_cast<int>(g_speakers.size())) {
+        cableInputIndex < 0 ||
+        (selfHear &&
+        (speakerIndex < 0 ||
+        speakerIndex >= static_cast<int>(g_speakers.size())))) {
 
         MessageBoxW(
             g_window,
-            L"Please select a microphone and speaker.",
+            L"Please select the required audio devices.",
             L"SheikzAmp",
             MB_ICONWARNING);
 
@@ -185,13 +218,6 @@ void startAmplifier() {
             0,
             0) == BST_CHECKED;
 
-    const bool selfHear =
-        SendMessageW(
-            g_selfHear,
-            BM_GETCHECK,
-            0,
-            0) == BST_CHECKED;
-
     try {
 
         g_route =
@@ -199,7 +225,10 @@ void startAmplifier() {
 
         g_route->startMicrophoneRoute({
             g_microphones[micIndex].id,
-            g_speakers[speakerIndex].id,
+            g_outputRoutes[cableInputIndex].id,
+            selfHear
+                ? g_speakers[speakerIndex].id
+                : L"",
             {
                 gain,
                 0.98F,
@@ -439,6 +468,14 @@ LRESULT CALLBACK windowProc(
 
         createLabel(
             hwnd,
+            L"Output: VB-CABLE Input (automatic)",
+            35,
+            155,
+            410,
+            25);
+
+createLabel(
+            hwnd,
             L"Self-Hear Speaker",
             35,
             165,
@@ -580,6 +617,10 @@ LRESULT CALLBACK windowProc(
 
         populateDevices();
 
+        EnableWindow(
+            g_speakerCombo,
+            TRUE);
+
         return 0;
     }
 
@@ -593,10 +634,27 @@ LRESULT CALLBACK windowProc(
 
         return 0;
 
-    case WM_COMMAND: {
+           case WM_COMMAND: {
 
         const int id =
             LOWORD(wParam);
+
+        if (id == IDC_SELF_HEAR &&
+            HIWORD(wParam) == BN_CLICKED) {
+
+            const bool enabled =
+                SendMessageW(
+                    g_selfHear,
+                    BM_GETCHECK,
+                    0,
+                    0) == BST_CHECKED;
+
+            EnableWindow(
+                g_speakerCombo,
+                enabled ? TRUE : FALSE);
+
+            return 0;
+        }
 
         if (id == IDC_START &&
             HIWORD(wParam) == BN_CLICKED) {

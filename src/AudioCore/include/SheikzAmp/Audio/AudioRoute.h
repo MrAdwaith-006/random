@@ -9,8 +9,11 @@ namespace SheikzAmp::Audio {
 
 struct MicrophoneRouteSettings {
     std::wstring inputDeviceId;
+    std::wstring outputDeviceId;
     std::wstring speakerDeviceId;
+
     AmplifierSettings amplifier{};
+
     bool selfHear{false};
 };
 

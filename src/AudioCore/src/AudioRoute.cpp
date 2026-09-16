@@ -3,6 +3,8 @@
 #include <Windows.h>
 #include <audioclient.h>
 #include <mmdeviceapi.h>
+#include <propsys.h>
+#include <functiondiscoverykeys_devpkey.h>
 #include <ksmedia.h>
 #include <wrl/client.h>
 
@@ -37,6 +39,120 @@ void check(HRESULT hr, const char* message) {
         throw std::runtime_error(
             std::string(message) + buffer);
     }
+}
+
+struct DeviceShareMode;
+
+struct __declspec(uuid("f8679f50-850a-41cf-9c72-430f290290c8")) IPolicyConfig : IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE GetMixFormat(PCWSTR, WAVEFORMATEX**) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetDeviceFormat(PCWSTR, INT, WAVEFORMATEX**) = 0;
+    virtual HRESULT STDMETHODCALLTYPE ResetDeviceFormat(PCWSTR) = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetDeviceFormat(PCWSTR, WAVEFORMATEX*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetProcessingPeriod(PCWSTR, INT, PINT64, PINT64) = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetProcessingPeriod(PCWSTR, PINT64) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetShareMode(PCWSTR, DeviceShareMode*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetShareMode(PCWSTR, DeviceShareMode*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetPropertyValue(PCWSTR, const PROPERTYKEY&, PROPVARIANT*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetPropertyValue(PCWSTR, const PROPERTYKEY&, const PROPVARIANT*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetDefaultEndpoint(PCWSTR, ERole) = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetEndpointVisibility(PCWSTR, BOOL) = 0;
+};
+
+struct __declspec(uuid("870af99c-171d-4f9e-af0d-e63df40c2bc9")) CPolicyConfigClient;
+
+std::wstring findActiveEndpointId(
+    IMMDeviceEnumerator* enumerator,
+    EDataFlow flow,
+    const wchar_t* namePart) {
+
+    ComPtr<IMMDeviceCollection> collection;
+
+    check(
+        enumerator->EnumAudioEndpoints(
+            flow,
+            DEVICE_STATE_ACTIVE,
+            &collection),
+        "Could not enumerate audio endpoints");
+
+    UINT count = 0;
+    check(collection->GetCount(&count),
+        "Could not read audio endpoint count");
+
+    for (UINT i = 0; i < count; ++i) {
+        ComPtr<IMMDevice> device;
+        if (FAILED(collection->Item(i, &device))) {
+            continue;
+        }
+
+        LPWSTR id = nullptr;
+        if (FAILED(device->GetId(&id))) {
+            continue;
+        }
+
+        ComPtr<IPropertyStore> properties;
+        if (SUCCEEDED(device->OpenPropertyStore(STGM_READ, &properties))) {
+            PROPVARIANT value;
+            PropVariantInit(&value);
+
+            if (SUCCEEDED(properties->GetValue(
+                    PKEY_Device_FriendlyName, &value)) &&
+                value.vt == VT_LPWSTR &&
+                value.pwszVal != nullptr) {
+
+                const std::wstring name(value.pwszVal);
+                if (name.find(namePart) != std::wstring::npos) {
+                    std::wstring result(id);
+                    PropVariantClear(&value);
+                    CoTaskMemFree(id);
+                    return result;
+                }
+            }
+
+            PropVariantClear(&value);
+        }
+
+        CoTaskMemFree(id);
+    }
+
+    return {};
+}
+
+std::wstring getDefaultRecordingEndpointId(
+    IMMDeviceEnumerator* enumerator) {
+
+    ComPtr<IMMDevice> device;
+    check(
+        enumerator->GetDefaultAudioEndpoint(
+            eCapture, eConsole, &device),
+        "Could not read default recording device");
+
+    LPWSTR id = nullptr;
+    check(device->GetId(&id),
+        "Could not read default recording device ID");
+
+    std::wstring result(id);
+    CoTaskMemFree(id);
+    return result;
+}
+
+void setDefaultRecordingEndpoint(const std::wstring& deviceId) {
+    ComPtr<IPolicyConfig> policy;
+
+    check(
+        CoCreateInstance(
+            __uuidof(CPolicyConfigClient),
+            nullptr,
+            CLSCTX_ALL,
+            __uuidof(IPolicyConfig),
+            reinterpret_cast<void**>(policy.GetAddressOf())),
+        "Could not access Windows audio policy");
+
+    check(policy->SetDefaultEndpoint(deviceId.c_str(), eConsole),
+        "Could not set default recording device");
+    check(policy->SetDefaultEndpoint(deviceId.c_str(), eMultimedia),
+        "Could not set multimedia recording device");
+    check(policy->SetDefaultEndpoint(deviceId.c_str(), eCommunications),
+        "Could not set communications recording device");
 }
 
 class ComApartment final {
@@ -86,12 +202,15 @@ bool isFloat32(const WAVEFORMATEX& format) noexcept {
     if (format.wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
         format.cbSize >= 22) {
 
-        if (format.wBitsPerSample == 32 &&
-            format.nBlockAlign ==
-                format.nChannels * sizeof(float)) {
+        const auto& ext =
+            reinterpret_cast<const WAVEFORMATEXTENSIBLE&>(
+                format);
 
-            return true;
-        }
+        return ext.SubFormat ==
+                   KSDATAFORMAT_SUBTYPE_IEEE_FLOAT &&
+               format.wBitsPerSample == 32 &&
+               format.nBlockAlign ==
+                   format.nChannels * sizeof(float);
     }
 
     return false;
@@ -688,6 +807,11 @@ public:
                 "Select an input microphone");
         }
 
+        if (settings.outputDeviceId.empty()) {
+            throw std::runtime_error(
+                "Select an output route");
+        }
+
         if (settings.selfHear &&
             settings.speakerDeviceId.empty()) {
 
@@ -718,6 +842,40 @@ public:
         processor_.setSettings(
             settings.amplifier);
 
+        try {
+            ComApartment com;
+            ComPtr<IMMDeviceEnumerator> enumerator;
+
+            check(
+                CoCreateInstance(
+                    __uuidof(MMDeviceEnumerator),
+                    nullptr,
+                    CLSCTX_ALL,
+                    IID_PPV_ARGS(&enumerator)),
+                "Could not create audio enumerator");
+
+            previousDefaultRecordingId_ =
+                getDefaultRecordingEndpointId(enumerator.Get());
+
+            const std::wstring cableOutputId =
+                findActiveEndpointId(
+                    enumerator.Get(),
+                    eCapture,
+                    L"CABLE Output");
+
+            if (cableOutputId.empty()) {
+                throw std::runtime_error(
+                    "CABLE Output was not found. Start VB-CABLE first.");
+            }
+
+            defaultRecordingChanged_ = true;
+            setDefaultRecordingEndpoint(cableOutputId);
+        }
+        catch (...) {
+            restoreDefaultRecordingDevice();
+            throw;
+        }
+
         running_ = true;
 
         try {
@@ -725,11 +883,13 @@ public:
                 &Implementation::run,
                 this,
                 settings.inputDeviceId,
+                settings.outputDeviceId,
                 settings.speakerDeviceId,
                 settings.selfHear);
         }
         catch (...) {
             running_ = false;
+            restoreDefaultRecordingDevice();
             throw;
         }
 
@@ -753,6 +913,8 @@ public:
                 worker_.join();
             }
 
+            restoreDefaultRecordingDevice();
+
             throw std::runtime_error(
             "Could not initialize microphone: " +
             std::string(
@@ -767,6 +929,8 @@ public:
                 worker_.join();
             }
 
+            restoreDefaultRecordingDevice();
+
             throw std::runtime_error(
                 "Audio engine startup timed out");
         }
@@ -778,6 +942,8 @@ public:
         if (worker_.joinable()) {
             worker_.join();
         }
+
+        restoreDefaultRecordingDevice();
     }
 
     [[nodiscard]]
@@ -830,10 +996,12 @@ private:
 
     void run(
         std::wstring inputId,
+        std::wstring outputId,
         std::wstring speakerId,
         bool selfHear) noexcept {
 
         ComPtr<IAudioClient> inputClient;
+        ComPtr<IAudioClient> outputClient;
         ComPtr<IAudioClient> speakerClient;
 
         try {
@@ -848,6 +1016,10 @@ private:
                     CLSCTX_ALL,
                     IID_PPV_ARGS(&enumerator)),
                 "Could not create audio enumerator");
+
+            // ------------------------------------------------------------
+            // INPUT MICROPHONE
+            // ------------------------------------------------------------
 
             ComPtr<IMMDevice> inputDevice;
 
@@ -874,62 +1046,162 @@ private:
                 "Could not read microphone format");
 
             WAVEFORMATEX inputFormat{};
-                inputFormat.wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
-                inputFormat.nChannels = 2;
-                inputFormat.nSamplesPerSec = 48000;
-                inputFormat.wBitsPerSample = 32;
-                inputFormat.nBlockAlign =
-                    inputFormat.nChannels *
-                    (inputFormat.wBitsPerSample / 8);
-                inputFormat.nAvgBytesPerSec =
-                    inputFormat.nSamplesPerSec *
-                    inputFormat.nBlockAlign;
-                inputFormat.cbSize = 0;
 
-                WAVEFORMATEX* closestFormat = nullptr;
+            inputFormat.wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
+            inputFormat.nChannels = 2;
+            inputFormat.nSamplesPerSec = 48000;
+            inputFormat.wBitsPerSample = 32;
+            inputFormat.nBlockAlign =
+                inputFormat.nChannels *
+                (inputFormat.wBitsPerSample / 8);
+            inputFormat.nAvgBytesPerSec =
+                inputFormat.nSamplesPerSec *
+                inputFormat.nBlockAlign;
+            inputFormat.cbSize = 0;
 
-                HRESULT formatResult =
-                    inputClient->IsFormatSupported(
-                        AUDCLNT_SHAREMODE_SHARED,
-                        &inputFormat,
-                        &closestFormat);
+            WAVEFORMATEX* closestFormat = nullptr;
 
-                if (closestFormat != nullptr) {
-                    CoTaskMemFree(closestFormat);
-                    closestFormat = nullptr;
-                }
+            HRESULT formatResult =
+                inputClient->IsFormatSupported(
+                    AUDCLNT_SHAREMODE_SHARED,
+                    &inputFormat,
+                    &closestFormat);
 
-                if (FAILED(formatResult)) {
-                    CoTaskMemFree(inputRaw);
+            if (closestFormat != nullptr) {
+                CoTaskMemFree(closestFormat);
+                closestFormat = nullptr;
+            }
 
-                    throw std::runtime_error(
-                        "Voicemod does not accept 48kHz float32 microphone format");
-                }
-
-                ComPtr<IAudioCaptureClient> capture;
-
-                check(
-                    inputClient->Initialize(
-                        AUDCLNT_SHAREMODE_SHARED,
-                        0,
-                        0,
-                        0,
-                        &inputFormat,
-                        nullptr),
-                    "Could not initialize microphone");
-
+            if (FAILED(formatResult)) {
                 CoTaskMemFree(inputRaw);
+
+                throw std::runtime_error(
+                    "Voicemod does not accept 48kHz float32 microphone format");
+            }
+
+            ComPtr<IAudioCaptureClient> capture;
+
+            check(
+                inputClient->Initialize(
+                    AUDCLNT_SHAREMODE_SHARED,
+                    0,
+                    0,
+                    0,
+                    &inputFormat,
+                    nullptr),
+                "Could not initialize microphone");
+
+            CoTaskMemFree(inputRaw);
 
             check(
                 inputClient->GetService(
                     IID_PPV_ARGS(&capture)),
                 "Could not open microphone capture");
 
-            WAVEFORMATEX speakerFormat{};
+            // ------------------------------------------------------------
+            // OUTPUT ROUTE
+            // Always active.
+            // ------------------------------------------------------------
+
+            ComPtr<IMMDevice> outputDevice;
+
+            check(
+                enumerator->GetDevice(
+                    outputId.c_str(),
+                    &outputDevice),
+                "Could not open output route");
+
+            check(
+                outputDevice->Activate(
+                    __uuidof(IAudioClient),
+                    CLSCTX_ALL,
+                    nullptr,
+                    reinterpret_cast<void**>(
+                        outputClient.GetAddressOf())),
+                "Could not activate output route");
+
+            WAVEFORMATEX* outputRaw = nullptr;
+
+            check(
+                outputClient->GetMixFormat(
+                    &outputRaw),
+                "Could not read output route format");
+
+            WAVEFORMATEXTENSIBLE outputFormatStorage{};
+
+            if (outputRaw->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
+                outputRaw->cbSize >= 22) {
+
+                std::memcpy(
+                    &outputFormatStorage,
+                    outputRaw,
+                    sizeof(WAVEFORMATEXTENSIBLE));
+
+            } else {
+
+                std::memcpy(
+                    &outputFormatStorage.Format,
+                    outputRaw,
+                    sizeof(WAVEFORMATEX));
+            }
+
+            CoTaskMemFree(outputRaw);
+
+            WAVEFORMATEX& outputFormat =
+                outputFormatStorage.Format;
+
+            const bool outputSupported =
+                isFloat32(outputFormat) ||
+                isPcm16(outputFormat) ||
+                isPcm24(outputFormat) ||
+                isPcm32(outputFormat);
+
+            if (!outputSupported) {
+                throw std::runtime_error(
+                    "Output route format is not supported");
+            }
+
+            const std::size_t outputChannels =
+                outputFormat.nChannels;
+
+            check(
+                outputClient->Initialize(
+                    AUDCLNT_SHAREMODE_SHARED,
+                    AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
+                    0,
+                    0,
+                    &outputFormat,
+                    nullptr),
+                "Could not initialize output route");
+
+
+            ComPtr<IAudioRenderClient> outputRender;
+
+            check(
+                outputClient->GetService(
+                    IID_PPV_ARGS(&outputRender)),
+                "Could not open output route renderer");
+
+            UINT32 outputBufferFrames = 0;
+
+            check(
+                outputClient->GetBufferSize(
+                    &outputBufferFrames),
+                "Could not read output route buffer size");
+
+            // ------------------------------------------------------------
+            // SELF HEAR SPEAKER
+            // Only active when Self Hear is enabled.
+            // ------------------------------------------------------------
+
+            WAVEFORMATEXTENSIBLE speakerFormatStorage{};
+            WAVEFORMATEX& speakerFormat = speakerFormatStorage.Format;
+
             std::size_t speakerChannels = 0;
             UINT32 speakerBufferFrames = 0;
+            double speakerRate = 0.0;
 
-            ComPtr<IAudioRenderClient> render;
+            ComPtr<IAudioRenderClient> speakerRender;
 
             if (selfHear) {
                 ComPtr<IMMDevice> speakerDevice;
@@ -956,120 +1228,128 @@ private:
                         &speakerRaw),
                     "Could not read speaker format");
 
-                speakerFormat =
-                    *speakerRaw;
+                if (speakerRaw->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
+                    speakerRaw->cbSize >= 22) {
 
-                const bool speakerSupported =
-                    isFloat32(speakerFormat) ||
-                    isPcm16(speakerFormat) ||
-                    isPcm24(speakerFormat) ||
-                    isPcm32(speakerFormat);
+                    std::memcpy(
+                        &speakerFormatStorage,
+                        speakerRaw,
+                        sizeof(WAVEFORMATEXTENSIBLE));
 
-                if (!speakerSupported) {
-                    CoTaskMemFree(speakerRaw);
+                } else {
 
-                    throw std::runtime_error(
-                        "Speaker format is not supported");
+                    std::memcpy(
+                        &speakerFormatStorage.Format,
+                        speakerRaw,
+                        sizeof(WAVEFORMATEX));
                 }
 
-                speakerChannels =
-                    speakerFormat.nChannels;
+                CoTaskMemFree(speakerRaw);
 
-                WAVEFORMATEX speakerInitFormat{};
-                    speakerInitFormat.wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
-                    speakerInitFormat.nChannels = speakerFormat.nChannels;
-                    speakerInitFormat.nSamplesPerSec = speakerFormat.nSamplesPerSec;
-                    speakerInitFormat.wBitsPerSample = 32;
-                    speakerInitFormat.nBlockAlign =
-                        speakerInitFormat.nChannels *
-                        sizeof(float);
-                    speakerInitFormat.nAvgBytesPerSec =
-                        speakerInitFormat.nSamplesPerSec *
-                        speakerInitFormat.nBlockAlign;
-                    speakerInitFormat.cbSize = 0;
 
-                    WAVEFORMATEX* speakerClosest = nullptr;
+                    const bool speakerSupported =
+                        isFloat32(speakerFormat) ||
+                        isPcm16(speakerFormat) ||
+                        isPcm24(speakerFormat) ||
+                        isPcm32(speakerFormat);
 
-                    HRESULT speakerFormatResult =
-                        speakerClient->IsFormatSupported(
-                            AUDCLNT_SHAREMODE_SHARED,
-                            &speakerInitFormat,
-                            &speakerClosest);
-
-                    if (speakerClosest != nullptr) {
-                        CoTaskMemFree(speakerClosest);
-                        speakerClosest = nullptr;
-                    }
-
-                    if (FAILED(speakerFormatResult)) {
-                        CoTaskMemFree(speakerRaw);
-
+                    if (!speakerSupported) {
                         throw std::runtime_error(
-                            "Speaker does not accept float32 mix format");
+                            "Speaker format is not supported");
                     }
 
-                    speakerFormat = speakerInitFormat;
+                    speakerChannels =
+                        speakerFormat.nChannels;
+                        speakerRate =
+                            static_cast<double>(
+                                speakerFormat.nSamplesPerSec);
 
                     check(
                         speakerClient->Initialize(
                             AUDCLNT_SHAREMODE_SHARED,
-                            0,
+                            AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
                             0,
                             0,
                             &speakerFormat,
                             nullptr),
                         "Could not initialize speaker");
 
-                CoTaskMemFree(speakerRaw);
+                    check(
+                        speakerClient->GetService(
+                            IID_PPV_ARGS(&speakerRender)),
+                        "Could not open speaker renderer");
 
-                check(
-                    speakerClient->GetService(
-                        IID_PPV_ARGS(&render)),
-                    "Could not open speaker renderer");
+                    check(
+                        speakerClient->GetBufferSize(
+                            &speakerBufferFrames),
+                        "Could not read speaker buffer size");
+                }
 
-                check(
-                    speakerClient->GetBufferSize(
-                        &speakerBufferFrames),
-                    "Could not read speaker buffer size");
-            }
+                    
 
-            /*
-             * We process internally at the microphone sample rate,
-             * convert channels, then resample to the speaker rate.
-             */
+            // ------------------------------------------------------------
+            // QUEUES / RESAMPLERS
+            // ------------------------------------------------------------
+
             const double inputRate =
                 static_cast<double>(
                     inputFormat.nSamplesPerSec);
 
             const double outputRate =
-                selfHear
-                    ? static_cast<double>(
-                          speakerFormat.nSamplesPerSec)
-                    : inputRate;
+                static_cast<double>(
+                    outputFormat.nSamplesPerSec);
 
-            FloatRingBuffer queue(
+            FloatRingBuffer outputQueue(
                 std::max<std::size_t>(
                     static_cast<std::size_t>(
-                        speakerBufferFrames) * 6,
+                        outputBufferFrames) * 6,
                     4096),
-                selfHear
-                    ? speakerChannels
-                    : inputFormat.nChannels);
+                outputChannels);
 
-            LinearResampler resampler(
-                selfHear
-                    ? speakerChannels
-                    : inputFormat.nChannels,
+            LinearResampler outputResampler(
+                outputChannels,
                 inputRate,
                 outputRate);
 
+            FloatRingBuffer speakerQueue(
+                std::max<std::size_t>(
+                    static_cast<std::size_t>(
+                        selfHear
+                            ? speakerBufferFrames
+                            : 0) * 6,
+                    4096),
+                selfHear
+                    ? speakerChannels
+                    : 1);
+
+            LinearResampler speakerResampler(
+                selfHear
+                    ? speakerChannels
+                    : 1,
+                inputRate,
+                selfHear
+                    ? speakerRate
+                    : inputRate);
+
             std::vector<float> captured;
-            std::vector<float> channelConverted;
-            std::vector<float> resampled;
+
+            std::vector<float> outputChannelsConverted;
+            std::vector<float> outputResampled;
+
+            std::vector<float> speakerChannelsConverted;
+            std::vector<float> speakerResampled;
+
+            // ------------------------------------------------------------
+            // START AUDIO
+            // ------------------------------------------------------------
 
             check(
                 inputClient->Start(),
                 "Could not start microphone");
+
+            check(
+                outputClient->Start(),
+                "Could not start output route");
 
             if (selfHear) {
                 check(
@@ -1078,6 +1358,10 @@ private:
             }
 
             signalStartupSuccess();
+
+            // ------------------------------------------------------------
+            // MAIN AUDIO LOOP
+            // ------------------------------------------------------------
 
             while (running_) {
                 UINT32 packetFrames = 0;
@@ -1088,7 +1372,7 @@ private:
                     "Could not query microphone");
 
                 while (packetFrames != 0 &&
-                       running_) {
+                    running_) {
 
                     BYTE* data = nullptr;
                     UINT32 frames = 0;
@@ -1104,12 +1388,12 @@ private:
                         "Could not capture microphone");
 
                     if ((flags &
-                         AUDCLNT_BUFFERFLAGS_SILENT) != 0) {
+                        AUDCLNT_BUFFERFLAGS_SILENT) != 0) {
 
                         captured.assign(
                             static_cast<std::size_t>(
                                 frames) *
-                                inputFormat.nChannels,
+                            inputFormat.nChannels,
                             0.0F);
                     }
                     else {
@@ -1121,26 +1405,54 @@ private:
                             captured);
                     }
 
+                    // DSP
                     processor_.processInterleaved(
                         std::span<float>(
                             captured.data(),
                             captured.size()));
 
+                    // ----------------------------------------------------
+                    // OUTPUT ROUTE
+                    // Always receive processed audio.
+                    // ----------------------------------------------------
+
+                    convertChannels(
+                        captured,
+                        inputFormat.nChannels,
+                        outputChannelsConverted,
+                        outputChannels);
+
+                    outputResampler.process(
+                        outputChannelsConverted,
+                        outputResampled);
+
+                    if (!outputResampled.empty()) {
+                        outputQueue.push(
+                            outputResampled.data(),
+                            outputResampled.size() /
+                                outputChannels);
+                    }
+
+                    // ----------------------------------------------------
+                    // SELF HEAR
+                    // Completely independent of Output Route.
+                    // ----------------------------------------------------
+
                     if (selfHear) {
                         convertChannels(
                             captured,
                             inputFormat.nChannels,
-                            channelConverted,
+                            speakerChannelsConverted,
                             speakerChannels);
 
-                        resampler.process(
-                            channelConverted,
-                            resampled);
+                        speakerResampler.process(
+                            speakerChannelsConverted,
+                            speakerResampled);
 
-                        if (!resampled.empty()) {
-                            queue.push(
-                                resampled.data(),
-                                resampled.size() /
+                        if (!speakerResampled.empty()) {
+                            speakerQueue.push(
+                                speakerResampled.data(),
+                                speakerResampled.size() /
                                     speakerChannels);
                         }
                     }
@@ -1155,6 +1467,69 @@ private:
                             &packetFrames),
                         "Could not query microphone");
                 }
+
+                // --------------------------------------------------------
+                // OUTPUT ROUTE RENDER
+                // --------------------------------------------------------
+
+                {
+                    UINT32 padding = 0;
+
+                    check(
+                        outputClient->GetCurrentPadding(
+                            &padding),
+                        "Could not query output route");
+
+                    const UINT32 writable =
+                        outputBufferFrames > padding
+                            ? outputBufferFrames - padding
+                            : 0;
+
+                    if (writable != 0) {
+                        BYTE* output = nullptr;
+
+                        check(
+                            outputRender->GetBuffer(
+                                writable,
+                                &output),
+                            "Could not acquire output route buffer");
+
+                        std::vector<float> renderSamples(
+                            static_cast<std::size_t>(
+                                writable) *
+                            outputChannels,
+                            0.0F);
+
+                        const std::size_t framesToWrite =
+                            std::min(
+                                static_cast<std::size_t>(
+                                    writable),
+                                outputQueue.availableFrames());
+
+                        if (framesToWrite > 0) {
+                            outputQueue.pop(
+                                renderSamples.data(),
+                                framesToWrite);
+                        }
+
+                        fromFloat(
+                            renderSamples.data(),
+                            writable,
+                            outputChannels,
+                            outputFormat,
+                            output);
+
+                        check(
+                            outputRender->ReleaseBuffer(
+                                writable,
+                                0),
+                            "Could not release output route buffer");
+                    }
+                }
+
+                // --------------------------------------------------------
+                // SELF HEAR RENDER
+                // --------------------------------------------------------
 
                 if (selfHear) {
                     UINT32 padding = 0;
@@ -1173,7 +1548,7 @@ private:
                         BYTE* output = nullptr;
 
                         check(
-                            render->GetBuffer(
+                            speakerRender->GetBuffer(
                                 writable,
                                 &output),
                             "Could not acquire speaker buffer");
@@ -1184,25 +1559,18 @@ private:
                             speakerChannels,
                             0.0F);
 
-                        const std::size_t available =
-                            queue.availableFrames();
-
                         const std::size_t framesToWrite =
                             std::min(
                                 static_cast<std::size_t>(
                                     writable),
-                                available);
+                                speakerQueue.availableFrames());
 
                         if (framesToWrite > 0) {
-                            queue.pop(
+                            speakerQueue.pop(
                                 renderSamples.data(),
                                 framesToWrite);
                         }
 
-                        /*
-                         * Anything not yet available from the
-                         * microphone is silence.
-                         */
                         fromFloat(
                             renderSamples.data(),
                             writable,
@@ -1211,7 +1579,7 @@ private:
                             output);
 
                         check(
-                            render->ReleaseBuffer(
+                            speakerRender->ReleaseBuffer(
                                 writable,
                                 0),
                             "Could not release speaker buffer");
@@ -1223,6 +1591,7 @@ private:
             }
 
             inputClient->Stop();
+            outputClient->Stop();
 
             if (selfHear) {
                 speakerClient->Stop();
@@ -1253,6 +1622,26 @@ private:
 
     bool startupComplete_{false};
     bool startupSuccess_{false};
+
+    std::wstring previousDefaultRecordingId_;
+    bool defaultRecordingChanged_{false};
+
+    void restoreDefaultRecordingDevice() noexcept {
+        if (!defaultRecordingChanged_ ||
+            previousDefaultRecordingId_.empty()) {
+            return;
+        }
+
+        try {
+            ComApartment com;
+            setDefaultRecordingEndpoint(previousDefaultRecordingId_);
+        }
+        catch (...) {
+        }
+
+        previousDefaultRecordingId_.clear();
+        defaultRecordingChanged_ = false;
+    }
 };
 
 AudioRoute::AudioRoute()
