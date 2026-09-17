@@ -3,12 +3,14 @@
 #include <Windows.h>
 #include <audioclient.h>
 #include <mmdeviceapi.h>
+#include <initguid.h>
 #include <propsys.h>
 #include <functiondiscoverykeys_devpkey.h>
 #include <ksmedia.h>
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -43,7 +45,17 @@ void check(HRESULT hr, const char* message) {
 
 struct DeviceShareMode;
 
-struct __declspec(uuid("f8679f50-850a-41cf-9c72-430f290290c8")) IPolicyConfig : IUnknown {
+// {f8679f50-850a-41cf-9c72-430f290290c8}
+inline constexpr GUID IID_IPolicyConfig = {
+    0xf8679f50, 0x850a, 0x41cf, {0x9c, 0x72, 0x43, 0x0f, 0x29, 0x02, 0x90, 0xc8}
+};
+
+// {870af99c-171d-4f9e-af0d-e63df40c2bc9}
+inline constexpr GUID CLSID_CPolicyConfigClient = {
+    0x870af99c, 0x171d, 0x4f9e, {0xaf, 0x0d, 0xe6, 0x3d, 0xf4, 0x0c, 0x2b, 0xc9}
+};
+
+struct IPolicyConfig : IUnknown {
     virtual HRESULT STDMETHODCALLTYPE GetMixFormat(PCWSTR, WAVEFORMATEX**) = 0;
     virtual HRESULT STDMETHODCALLTYPE GetDeviceFormat(PCWSTR, INT, WAVEFORMATEX**) = 0;
     virtual HRESULT STDMETHODCALLTYPE ResetDeviceFormat(PCWSTR) = 0;
@@ -57,8 +69,6 @@ struct __declspec(uuid("f8679f50-850a-41cf-9c72-430f290290c8")) IPolicyConfig : 
     virtual HRESULT STDMETHODCALLTYPE SetDefaultEndpoint(PCWSTR, ERole) = 0;
     virtual HRESULT STDMETHODCALLTYPE SetEndpointVisibility(PCWSTR, BOOL) = 0;
 };
-
-struct __declspec(uuid("870af99c-171d-4f9e-af0d-e63df40c2bc9")) CPolicyConfigClient;
 
 std::wstring findActiveEndpointId(
     IMMDeviceEnumerator* enumerator,
@@ -140,10 +150,10 @@ void setDefaultRecordingEndpoint(const std::wstring& deviceId) {
 
     check(
         CoCreateInstance(
-            __uuidof(CPolicyConfigClient),
+            CLSID_CPolicyConfigClient,
             nullptr,
             CLSCTX_ALL,
-            __uuidof(IPolicyConfig),
+            IID_IPolicyConfig,
             reinterpret_cast<void**>(policy.GetAddressOf())),
         "Could not access Windows audio policy");
 
@@ -863,13 +873,10 @@ public:
                     eCapture,
                     L"CABLE Output");
 
-            if (cableOutputId.empty()) {
-                throw std::runtime_error(
-                    "CABLE Output was not found. Start VB-CABLE first.");
+            if (!cableOutputId.empty()) {
+                defaultRecordingChanged_ = true;
+                setDefaultRecordingEndpoint(cableOutputId);
             }
-
-            defaultRecordingChanged_ = true;
-            setDefaultRecordingEndpoint(cableOutputId);
         }
         catch (...) {
             restoreDefaultRecordingDevice();
@@ -955,6 +962,28 @@ public:
     std::wstring lastError() const {
         std::lock_guard lock(errorMutex_);
         return lastError_;
+    }
+
+    void updateSettings(
+        const AmplifierSettings& settings) noexcept {
+        processor_.setSettings(settings);
+    }
+
+    void getAudioLevels(
+        float& outInputLevel,
+        float& outOutputLevel,
+        float* outBands,
+        int bandCount) const noexcept {
+
+        outInputLevel = inPeak_.load(std::memory_order_relaxed);
+        outOutputLevel = outPeak_.load(std::memory_order_relaxed);
+
+        if (outBands && bandCount > 0) {
+            const int count = std::min(bandCount, 16);
+            for (int i = 0; i < count; ++i) {
+                outBands[i] = bandLevels_[i].load(std::memory_order_relaxed);
+            }
+        }
     }
 
 private:
@@ -1045,38 +1074,38 @@ private:
                     &inputRaw),
                 "Could not read microphone format");
 
-            WAVEFORMATEX inputFormat{};
+            WAVEFORMATEXTENSIBLE inputFormatStorage{};
 
-            inputFormat.wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
-            inputFormat.nChannels = 2;
-            inputFormat.nSamplesPerSec = 48000;
-            inputFormat.wBitsPerSample = 32;
-            inputFormat.nBlockAlign =
-                inputFormat.nChannels *
-                (inputFormat.wBitsPerSample / 8);
-            inputFormat.nAvgBytesPerSec =
-                inputFormat.nSamplesPerSec *
-                inputFormat.nBlockAlign;
-            inputFormat.cbSize = 0;
+            if (inputRaw->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
+                inputRaw->cbSize >= 22) {
 
-            WAVEFORMATEX* closestFormat = nullptr;
+                std::memcpy(
+                    &inputFormatStorage,
+                    inputRaw,
+                    sizeof(WAVEFORMATEXTENSIBLE));
 
-            HRESULT formatResult =
-                inputClient->IsFormatSupported(
-                    AUDCLNT_SHAREMODE_SHARED,
-                    &inputFormat,
-                    &closestFormat);
+            } else {
 
-            if (closestFormat != nullptr) {
-                CoTaskMemFree(closestFormat);
-                closestFormat = nullptr;
+                std::memcpy(
+                    &inputFormatStorage.Format,
+                    inputRaw,
+                    sizeof(WAVEFORMATEX));
             }
 
-            if (FAILED(formatResult)) {
-                CoTaskMemFree(inputRaw);
+            CoTaskMemFree(inputRaw);
 
+            WAVEFORMATEX& inputFormat =
+                inputFormatStorage.Format;
+
+            const bool inputSupported =
+                isFloat32(inputFormat) ||
+                isPcm16(inputFormat) ||
+                isPcm24(inputFormat) ||
+                isPcm32(inputFormat);
+
+            if (!inputSupported) {
                 throw std::runtime_error(
-                    "Voicemod does not accept 48kHz float32 microphone format");
+                    "Microphone format is not supported");
             }
 
             ComPtr<IAudioCaptureClient> capture;
@@ -1084,14 +1113,12 @@ private:
             check(
                 inputClient->Initialize(
                     AUDCLNT_SHAREMODE_SHARED,
-                    0,
+                    AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
                     0,
                     0,
                     &inputFormat,
                     nullptr),
                 "Could not initialize microphone");
-
-            CoTaskMemFree(inputRaw);
 
             check(
                 inputClient->GetService(
@@ -1405,11 +1432,49 @@ private:
                             captured);
                     }
 
+                    // Compute input peak & frequency band energies
+                    float inPeak = 0.0F;
+                    for (float s : captured) {
+                        float a = std::abs(s);
+                        if (a > inPeak) inPeak = a;
+                    }
+                    float prevIn = inPeak_.load(std::memory_order_relaxed);
+                    inPeak_.store(std::max(inPeak, prevIn * 0.85F), std::memory_order_relaxed);
+
+                    if (!captured.empty()) {
+                        const std::size_t ch = inputFormat.nChannels > 0 ? inputFormat.nChannels : 1;
+                        const std::size_t sampleCount = captured.size() / ch;
+                        float rawBands[16] = {0.0F};
+
+                        for (std::size_t i = 0; i < sampleCount; ++i) {
+                            float val = std::abs(captured[i * ch]);
+                            float diff = (i > 0) ? std::abs(captured[i * ch] - captured[(i - 1) * ch]) : 0.0F;
+                            for (int b = 0; b < 16; ++b) {
+                                float weight = (b < 6)
+                                    ? (val * (1.0F - b * 0.09F) + diff * b * 0.07F)
+                                    : (diff * (0.35F + b * 0.1F));
+                                if (weight > rawBands[b]) rawBands[b] = weight;
+                            }
+                        }
+                        for (int b = 0; b < 16; ++b) {
+                            float prev = bandLevels_[b].load(std::memory_order_relaxed);
+                            bandLevels_[b].store(std::max(rawBands[b], prev * 0.88F), std::memory_order_relaxed);
+                        }
+                    }
+
                     // DSP
                     processor_.processInterleaved(
                         std::span<float>(
                             captured.data(),
                             captured.size()));
+
+                    float outPeak = 0.0F;
+                    for (float s : captured) {
+                        float a = std::abs(s);
+                        if (a > outPeak) outPeak = a;
+                    }
+                    float prevOut = outPeak_.load(std::memory_order_relaxed);
+                    outPeak_.store(std::max(outPeak, prevOut * 0.85F), std::memory_order_relaxed);
 
                     // ----------------------------------------------------
                     // OUTPUT ROUTE
@@ -1626,6 +1691,10 @@ private:
     std::wstring previousDefaultRecordingId_;
     bool defaultRecordingChanged_{false};
 
+    std::atomic<float> inPeak_{0.0F};
+    std::atomic<float> outPeak_{0.0F};
+    std::array<std::atomic<float>, 16> bandLevels_{};
+
     void restoreDefaultRecordingDevice() noexcept {
         if (!defaultRecordingChanged_ ||
             previousDefaultRecordingId_.empty()) {
@@ -1667,6 +1736,31 @@ bool AudioRoute::isRunning() const noexcept {
 
 std::wstring AudioRoute::lastError() const {
     return implementation_->lastError();
+}
+
+void AudioRoute::updateSettings(
+    const AmplifierSettings& settings) noexcept {
+
+    if (implementation_) {
+        implementation_->updateSettings(settings);
+    }
+}
+
+void AudioRoute::getAudioLevels(
+    float& outInputLevel,
+    float& outOutputLevel,
+    float* outBands,
+    int bandCount) const noexcept {
+
+    if (implementation_) {
+        implementation_->getAudioLevels(outInputLevel, outOutputLevel, outBands, bandCount);
+    } else {
+        outInputLevel = 0.0F;
+        outOutputLevel = 0.0F;
+        if (outBands && bandCount > 0) {
+            std::fill_n(outBands, bandCount, 0.0F);
+        }
+    }
 }
 
 } // namespace SheikzAmp::Audio

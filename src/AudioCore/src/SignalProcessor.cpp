@@ -6,24 +6,32 @@
 namespace SheikzAmp::Audio {
 
 void SignalProcessor::setSettings(
-    AmplifierSettings settings) noexcept {
+    const AmplifierSettings& settings) noexcept {
 
-    settings_.preamp = std::clamp(
-        settings.preamp,
-        1.0F,
-        100.0F);
+    preamp_.store(
+        std::clamp(settings.preamp, 1.0F, 100.0F),
+        std::memory_order_relaxed);
 
-    settings_.ceiling = std::clamp(
-        settings.ceiling,
-        0.01F,
-        1.0F);
+    ceiling_.store(
+        std::clamp(settings.ceiling, 0.01F, 1.0F),
+        std::memory_order_relaxed);
 
-    settings_.saturation = std::clamp(
-        settings.saturation,
-        0.0F,
-        1.0F);
+    saturation_.store(
+        std::clamp(settings.saturation, 0.0F, 1.0F),
+        std::memory_order_relaxed);
 
-    settings_.maxLoud = settings.maxLoud;
+    maxLoud_.store(
+        settings.maxLoud,
+        std::memory_order_relaxed);
+}
+
+AmplifierSettings SignalProcessor::getSettings() const noexcept {
+    return {
+        preamp_.load(std::memory_order_relaxed),
+        ceiling_.load(std::memory_order_relaxed),
+        saturation_.load(std::memory_order_relaxed),
+        maxLoud_.load(std::memory_order_relaxed)
+    };
 }
 
 void SignalProcessor::processInterleaved(
@@ -33,10 +41,11 @@ void SignalProcessor::processInterleaved(
         return;
     }
 
-    const float gain = settings_.preamp;
-    const float ceiling = settings_.ceiling;
+    const float gain = preamp_.load(std::memory_order_relaxed);
+    const float ceiling = ceiling_.load(std::memory_order_relaxed);
+    const bool maxLoud = maxLoud_.load(std::memory_order_relaxed);
 
-    if (!settings_.maxLoud) {
+    if (!maxLoud) {
 
         // Clean amplification with only peak protection.
         for (float& sample : samples) {

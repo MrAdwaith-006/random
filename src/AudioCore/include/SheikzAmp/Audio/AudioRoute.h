@@ -27,10 +27,14 @@ public:
 
     void startMicrophoneRoute(const MicrophoneRouteSettings& settings);
 
+    void updateSettings(const AmplifierSettings& settings) noexcept;
+
     void stop() noexcept;
 
     [[nodiscard]] bool isRunning() const noexcept;
     [[nodiscard]] std::wstring lastError() const;
+
+    void getAudioLevels(float& outInputLevel, float& outOutputLevel, float* outBands = nullptr, int bandCount = 0) const noexcept;
 
 private:
     class Implementation;

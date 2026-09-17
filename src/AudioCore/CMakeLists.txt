@@ -10,5 +10,9 @@ target_include_directories(SheikzAmpAudioCore
 )
 
 target_compile_definitions(SheikzAmpAudioCore PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_compile_options(SheikzAmpAudioCore PRIVATE /W4 /permissive-)
-target_link_libraries(SheikzAmpAudioCore PUBLIC ole32 uuid avrt)
+if(MSVC)
+    target_compile_options(SheikzAmpAudioCore PRIVATE /W4 /permissive-)
+else()
+    target_compile_options(SheikzAmpAudioCore PRIVATE -Wall -Wextra)
+endif()
+target_link_libraries(SheikzAmpAudioCore PUBLIC ole32 uuid avrt ksguid propsys)
