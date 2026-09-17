@@ -38,6 +38,7 @@ namespace {
 HWND g_hwnd = nullptr;
 ULONG_PTR g_gdiplusToken = 0;
 std::unique_ptr<Gdiplus::Bitmap> g_bgImage;
+std::unique_ptr<Gdiplus::Bitmap> g_logoImage;
 
 std::vector<AudioDevice> g_microphones;
 std::vector<AudioDevice> g_speakers;
@@ -191,6 +192,28 @@ void loadAssets() {
         if (GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES) {
             g_bgImage = std::make_unique<Gdiplus::Bitmap>(path.c_str());
             if (g_bgImage && g_bgImage->GetLastStatus() == Gdiplus::Ok) {
+                break;
+            }
+        }
+    }
+
+    std::vector<std::wstring> logoCandidates = {
+        exeDir + L"\\assets\\sheikzamp_logo.png",
+        exeDir + L"\\..\\assets\\sheikzamp_logo.png",
+        L"assets\\sheikzamp_logo.png",
+        L"src\\App\\assets\\sheikzamp_logo.png",
+        L"d:\\SheikzAmp\\src\\App\\assets\\sheikzamp_logo.png",
+        exeDir + L"\\assets\\sheikzamp_logo.jpg",
+        exeDir + L"\\..\\assets\\sheikzamp_logo.jpg",
+        L"assets\\sheikzamp_logo.jpg",
+        L"src\\App\\assets\\sheikzamp_logo.jpg",
+        L"d:\\SheikzAmp\\src\\App\\assets\\sheikzamp_logo.jpg"
+    };
+
+    for (const auto& path : logoCandidates) {
+        if (GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            g_logoImage = std::make_unique<Gdiplus::Bitmap>(path.c_str());
+            if (g_logoImage && g_logoImage->GetLastStatus() == Gdiplus::Ok) {
                 break;
             }
         }
@@ -677,26 +700,36 @@ void renderUI(HDC hdc, int width, int height) {
     // 3. Custom Modern Title Bar matching reference photo
     // ------------------------------------------------------------------------
     {
-        // Custom App Icon Badge on Title Bar (Stylized S with Crown)
-        RectF iconBadge(16.0f, 7.0f, 22.0f, 22.0f);
+        // Custom App Icon Badge on Title Bar (SheikzAmp Logo)
+        RectF iconBadge(14.0f, 6.0f, 24.0f, 24.0f);
         GraphicsPath badgePath;
-        addRoundedRect(badgePath, iconBadge, 5.0f);
-        SolidBrush badgeBg(Color(180, 0, 40, 70));
-        g.FillPath(&badgeBg, &badgePath);
-        Pen badgeBorder(Color(255, 0, 229, 255), 1.2f);
-        g.DrawPath(&badgeBorder, &badgePath);
+        addRoundedRect(badgePath, iconBadge, 6.0f);
 
-        // "S" logo inside badge
-        Font sFont(L"Arial Black", 10.0f, FontStyleBold, UnitPoint);
-        SolidBrush sBrush(Color(255, 0, 229, 255));
-        StringFormat sfCenter;
-        sfCenter.SetAlignment(StringAlignmentCenter);
-        g.DrawString(L"S", -1, &sFont, PointF(iconBadge.X + iconBadge.Width * 0.5f, iconBadge.Y + 1.0f), &sfCenter, &sBrush);
+        if (g_logoImage && g_logoImage->GetLastStatus() == Gdiplus::Ok) {
+            GraphicsState state = g.Save();
+            g.SetClip(&badgePath, CombineModeReplace);
+            g.DrawImage(g_logoImage.get(), iconBadge);
+            g.Restore(state);
+            Pen badgeBorder(Color(255, 0, 229, 255), 1.2f);
+            g.DrawPath(&badgeBorder, &badgePath);
+        } else {
+            SolidBrush badgeBg(Color(180, 0, 40, 70));
+            g.FillPath(&badgeBg, &badgePath);
+            Pen badgeBorder(Color(255, 0, 229, 255), 1.2f);
+            g.DrawPath(&badgeBorder, &badgePath);
+
+            // "S" logo inside badge
+            Font sFont(L"Arial Black", 10.0f, FontStyleBold, UnitPoint);
+            SolidBrush sBrush(Color(255, 0, 229, 255));
+            StringFormat sfCenter;
+            sfCenter.SetAlignment(StringAlignmentCenter);
+            g.DrawString(L"S", -1, &sFont, PointF(iconBadge.X + iconBadge.Width * 0.5f, iconBadge.Y + 1.0f), &sfCenter, &sBrush);
+        }
 
         // App Title
         SolidBrush titleTextBrush(Color(240, 255, 255, 255));
         Font titleFont(L"Segoe UI", 9.2f, FontStyleBold, UnitPoint);
-        g.DrawString(L"SheikzAmp", -1, &titleFont, PointF(44, 9), &titleTextBrush);
+        g.DrawString(L"SheikzAmp", -1, &titleFont, PointF(46, 9), &titleTextBrush);
 
         // Minimize
         if (g_anim.hoverMin > 0.01f) {
@@ -733,7 +766,7 @@ void renderUI(HDC hdc, int width, int height) {
     }
 
     // ------------------------------------------------------------------------
-    // 4. Hero Header Section matching reference photo
+    // 4. Hero Header Section
     // ------------------------------------------------------------------------
     {
         // Left Slogan: Vertical cyan bar + "SOUND \n BEYOND \n LIMITS"
@@ -749,34 +782,56 @@ void renderUI(HDC hdc, int width, int height) {
         StringFormat sfRightSlogan;
         g.DrawString(L"HEAR\nFEEL\nDOMINATE", -1, &sloganFont, PointF(width - 74.0f, 68), &sfRightSlogan, &sloganBrush);
 
-        // Center Glowing Crown Icon
-        drawCrownIcon(g, width * 0.5f - 18.0f, 38.0f, 36.0f, g_animTime * 3.0f);
+        if (g_logoImage && g_logoImage->GetLastStatus() == Gdiplus::Ok) {
+            // Glowing cyan aura behind the logo that pulses smoothly with animation & audio
+            float auraPulse = sinf(g_animTime * 2.5f) * 6.0f + g_viz.smoothOut * 12.0f;
+            float logoSize = 104.0f;
+            float logoX = (width - logoSize) * 0.5f;
+            float logoY = 36.0f;
 
-        // Stylized "SHEIKZAMP" Gaming Logo with intense cyan outline glow
-        Font brandFont(L"Arial Black", 24.0f, FontStyleBold, UnitPoint);
-        StringFormat sfCenter;
-        sfCenter.SetAlignment(StringAlignmentCenter);
+            GraphicsPath auraPath;
+            auraPath.AddEllipse(RectF(width * 0.5f - 56.0f - auraPulse * 0.5f, 36.0f + 52.0f - 56.0f - auraPulse * 0.5f, 112.0f + auraPulse, 112.0f + auraPulse));
+            PathGradientBrush auraBrush(&auraPath);
+            int auraAlpha = static_cast<int>(50 + sinf(g_animTime * 2.5f) * 20.0f + g_viz.smoothOut * 60.0f);
+            auraBrush.SetCenterColor(Color(std::clamp(auraAlpha, 20, 180), 0, 229, 255));
+            Color surroundColors[] = { Color(0, 0, 0, 0) };
+            int count = 1;
+            auraBrush.SetSurroundColors(surroundColors, &count);
+            g.FillPath(&auraBrush, &auraPath);
 
-        float shimmer = sinf(g_animTime * 2.5f) * 0.5f + 0.5f;
-        int glowA = static_cast<int>(60 + shimmer * 45.0f + g_viz.smoothOut * 70.0f);
-        SolidBrush glowBrush(Color(std::min(255, glowA), 0, 229, 255));
+            // Draw High-Resolution SheikzAmp Logo Badge
+            RectF logoRect(logoX, logoY, logoSize, logoSize);
+            g.DrawImage(g_logoImage.get(), logoRect);
+        } else {
+            // Center Glowing Crown Icon fallback
+            drawCrownIcon(g, width * 0.5f - 18.0f, 38.0f, 36.0f, g_animTime * 3.0f);
 
-        for (int dx = -3; dx <= 3; ++dx) {
-            for (int dy = -3; dy <= 3; ++dy) {
-                if (dx != 0 || dy != 0) {
-                    g.DrawString(L"SHEIKZAMP", -1, &brandFont, PointF(width * 0.5f + dx, 76.0f + dy), &sfCenter, &glowBrush);
+            // Stylized "SHEIKZAMP" Gaming Logo with intense cyan outline glow
+            Font brandFont(L"Arial Black", 24.0f, FontStyleBold, UnitPoint);
+            StringFormat sfCenter;
+            sfCenter.SetAlignment(StringAlignmentCenter);
+
+            float shimmer = sinf(g_animTime * 2.5f) * 0.5f + 0.5f;
+            int glowA = static_cast<int>(60 + shimmer * 45.0f + g_viz.smoothOut * 70.0f);
+            SolidBrush glowBrush(Color(std::min(255, glowA), 0, 229, 255));
+
+            for (int dx = -3; dx <= 3; ++dx) {
+                for (int dy = -3; dy <= 3; ++dy) {
+                    if (dx != 0 || dy != 0) {
+                        g.DrawString(L"SHEIKZAMP", -1, &brandFont, PointF(width * 0.5f + dx, 76.0f + dy), &sfCenter, &glowBrush);
+                    }
                 }
             }
+
+            // Inner title: Pristine electric cyan / white gradient
+            SolidBrush titleBrush(Color(255, 245, 252, 255));
+            g.DrawString(L"SHEIKZAMP", -1, &brandFont, PointF(width * 0.5f, 76.0f), &sfCenter, &titleBrush);
+
+            // Subtitle: "A M P L I F Y   E V E R Y T H I N G"
+            Font subFont(L"Segoe UI", 7.8f, FontStyleBold, UnitPoint);
+            SolidBrush subBrush(Color(220, 180, 220, 245));
+            g.DrawString(L"A M P L I F Y   E V E R Y T H I N G", -1, &subFont, PointF(width * 0.5f, 122.0f), &sfCenter, &subBrush);
         }
-
-        // Inner title: Pristine electric cyan / white gradient
-        SolidBrush titleBrush(Color(255, 245, 252, 255));
-        g.DrawString(L"SHEIKZAMP", -1, &brandFont, PointF(width * 0.5f, 76.0f), &sfCenter, &titleBrush);
-
-        // Subtitle: "A M P L I F Y   E V E R Y T H I N G"
-        Font subFont(L"Segoe UI", 7.8f, FontStyleBold, UnitPoint);
-        SolidBrush subBrush(Color(220, 180, 220, 245));
-        g.DrawString(L"A M P L I F Y   E V E R Y T H I N G", -1, &subFont, PointF(width * 0.5f, 122.0f), &sfCenter, &subBrush);
     }
 
     // ------------------------------------------------------------------------
@@ -1471,11 +1526,31 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
 
     loadAssets();
 
+    // Load application icon from embedded resource or file
+    HICON hIcon = (HICON)LoadImageW(hInstance, MAKEINTRESOURCEW(101), IMAGE_ICON, 0, 0, LR_DEFAULTSIZE | LR_SHARED);
+    if (!hIcon) {
+        hIcon = (HICON)LoadImageW(hInstance, MAKEINTRESOURCEW(1), IMAGE_ICON, 0, 0, LR_DEFAULTSIZE | LR_SHARED);
+    }
+    if (!hIcon) {
+        std::wstring icoPath = getExecutableDir() + L"\\assets\\sheikzamp.ico";
+        hIcon = (HICON)LoadImageW(nullptr, icoPath.c_str(), IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE);
+    }
+    HICON hIconSm = (HICON)LoadImageW(hInstance, MAKEINTRESOURCEW(101), IMAGE_ICON, 16, 16, LR_SHARED);
+    if (!hIconSm) {
+        hIconSm = (HICON)LoadImageW(hInstance, MAKEINTRESOURCEW(1), IMAGE_ICON, 16, 16, LR_SHARED);
+    }
+    if (!hIconSm) {
+        std::wstring icoPath = getExecutableDir() + L"\\assets\\sheikzamp.ico";
+        hIconSm = (HICON)LoadImageW(nullptr, icoPath.c_str(), IMAGE_ICON, 16, 16, LR_LOADFROMFILE);
+    }
+
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(WNDCLASSEXW);
     wc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInstance;
+    wc.hIcon = hIcon;
+    wc.hIconSm = hIconSm;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wc.hbrBackground = nullptr;
     wc.lpszClassName = L"SheikzAmpModernUI";
@@ -1508,6 +1583,13 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
         return 1;
     }
 
+    if (hIcon) {
+        SendMessageW(g_hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(hIcon));
+    }
+    if (hIconSm) {
+        SendMessageW(g_hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(hIconSm));
+    }
+
     // Enable Windows 11 rounded corners & immersive dark mode
     BOOL darkMode = TRUE;
     DwmSetWindowAttribute(g_hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &darkMode, sizeof(darkMode));
@@ -1531,6 +1613,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
     g_backGraphics.reset();
     g_backBuffer.reset();
     g_bgImage.reset();
+    g_logoImage.reset();
     GdiplusShutdown(g_gdiplusToken);
     return static_cast<int>(msg.wParam);
 }

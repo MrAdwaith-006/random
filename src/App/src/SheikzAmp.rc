@@ -1,0 +1,5 @@
+#define IDI_APP_ICON 101
+
+// Lowest ID icon is automatically used by Windows Explorer as the application icon
+1 ICON "../assets/sheikzamp.ico"
+IDI_APP_ICON ICON "../assets/sheikzamp.ico"

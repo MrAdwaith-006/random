@@ -1,5 +1,6 @@
 add_executable(SheikzAmp WIN32
     src/main.cpp
+    src/SheikzAmp.rc
 )
 
 target_link_libraries(SheikzAmp PRIVATE SheikzAmpAudioCore comctl32 uxtheme gdiplus msimg32 dwmapi)
